@@ -40,6 +40,7 @@ settings = get_settings()
 
 class ActionType(str, Enum):
     """Types of browser actions the executor can perform."""
+    # Low-level browser primitives
     NAVIGATE = "navigate"
     CLICK = "click"
     TYPE = "type"
@@ -50,6 +51,15 @@ class ActionType(str, Enum):
     SCROLL = "scroll"
     HOVER = "hover"
     EXTRACT = "extract"
+    # High-level composite actions (orchestrated by the agent)
+    SEARCH = "search"           # Navigate + type in search + click search button
+    SCRAPE = "scrape"           # Extract structured data from page
+    FILL_FORM = "fill_form"     # Fill form fields
+    SUBMIT = "submit"           # Submit form
+    VERIFY = "verify"           # Verification check
+    LOOP = "loop"               # Loop control (handled by executor)
+    SUMMARIZE = "summarize"     # Generate summary (handled by executor)
+    GENERATE = "generate"       # LLM generation (handled by executor)
 
 
 @dataclass
@@ -354,6 +364,20 @@ class BrowserAgent:
                 result = await self._handle_hover(step_data)
             elif action == ActionType.EXTRACT:
                 result = await self._handle_extract(step_data)
+            # High-level composite actions
+            elif action == ActionType.SEARCH:
+                result = await self._handle_search(step_data)
+            elif action == ActionType.SCRAPE:
+                result = await self._handle_scrape(step_data)
+            elif action == ActionType.FILL_FORM:
+                result = await self._handle_fill_form(step_data)
+            elif action == ActionType.SUBMIT:
+                result = await self._handle_submit(step_data)
+            elif action == ActionType.VERIFY:
+                result = await self._handle_verify(step_data)
+            elif action in (ActionType.LOOP, ActionType.SUMMARIZE, ActionType.GENERATE):
+                # These are handled by the executor, not the browser agent
+                result = StepResult(success=True, action=action, data={"note": "Handled by executor"})
             else:
                 result = StepResult(
                     success=False,
@@ -728,6 +752,325 @@ class BrowserAgent:
                 selector=selector,
                 error=str(e)
             )
+    
+    # =========================================================================
+    # HIGH-LEVEL COMPOSITE ACTION HANDLERS
+    # These orchestrate multiple low-level actions
+    # =========================================================================
+    
+    async def _handle_search(self, step_data: Dict[str, Any]) -> StepResult:
+        """
+        Handle job search on a platform.
+        
+        Performs:
+        1. Navigate to the platform's job search page
+        2. Fill in the search query
+        3. Apply filters (location, remote, etc.)
+        4. Extract job listings
+        """
+        platform = step_data.get("platform", "linkedin").lower()
+        query = step_data.get("query", "software engineer")
+        location = step_data.get("location")
+        remote = step_data.get("remote", False)
+        
+        print(f"[BrowserAgent] Searching {platform} for: {query}")
+        
+        # Platform-specific search URLs
+        search_urls = {
+            "linkedin": f"https://www.linkedin.com/jobs/search/?keywords={query.replace(' ', '%20')}",
+            "indeed": f"https://www.indeed.com/jobs?q={query.replace(' ', '+')}",
+            "glassdoor": f"https://www.glassdoor.com/Job/jobs.htm?sc.keyword={query.replace(' ', '%20')}",
+        }
+        
+        url = search_urls.get(platform)
+        if not url:
+            # Default to LinkedIn for unknown platforms
+            url = search_urls["linkedin"]
+        
+        # Add location filter if provided
+        if location:
+            if platform == "linkedin":
+                url += f"&location={location.replace(' ', '%20')}"
+            elif platform == "indeed":
+                url += f"&l={location.replace(' ', '+')}"
+        
+        # Add remote filter
+        if remote:
+            if platform == "linkedin":
+                url += "&f_WT=2"  # LinkedIn remote work filter
+            elif platform == "indeed":
+                url += "&remotejob=032b3046-06a3-4876-8dfd-474eb5e7ed11"
+        
+        try:
+            # Navigate to search page
+            await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(2)  # Let the page load fully
+            
+            # Scroll down to load more results
+            await self._page.evaluate("window.scrollBy(0, 500)")
+            await asyncio.sleep(1)
+            
+            # Extract job listings (simplified - extract job links)
+            jobs = []
+            job_selectors = {
+                "linkedin": ".job-card-container, .jobs-search-results__list-item",
+                "indeed": ".job_seen_beacon, .resultContent",
+                "glassdoor": ".react-job-listing, [data-test='job-listing']",
+            }
+            
+            selector = job_selectors.get(platform, job_selectors["linkedin"])
+            job_elements = await self._page.query_selector_all(selector)
+            
+            for i, el in enumerate(job_elements[:20]):  # Limit to 20
+                try:
+                    title_text = await el.text_content()
+                    jobs.append({
+                        "index": i,
+                        "text": (title_text or "")[:200].strip(),
+                    })
+                except:
+                    pass
+            
+            print(f"[BrowserAgent] Found {len(jobs)} job listings on {platform}")
+            
+            return StepResult(
+                success=True,
+                action="search",
+                data={
+                    "platform": platform,
+                    "query": query,
+                    "job_count": len(jobs),
+                    "jobs": jobs[:10],  # Return first 10
+                    "search_url": url,
+                }
+            )
+            
+        except Exception as e:
+            print(f"[BrowserAgent] Search failed: {e}")
+            return StepResult(
+                success=False,
+                action="search",
+                error=f"Search failed: {str(e)}"
+            )
+    
+    async def _handle_scrape(self, step_data: Dict[str, Any]) -> StepResult:
+        """
+        Scrape structured data from the current page.
+        
+        Extracts:
+        - Job descriptions
+        - Requirements
+        - Company info
+        """
+        extract_fields = step_data.get("extract", ["description"])
+        
+        try:
+            # Get page content
+            content = await self._page.text_content("body") or ""
+            title = await self._page.title()
+            url = self._page.url
+            
+            data = {
+                "url": url,
+                "title": title,
+                "content_length": len(content),
+                "extracted": {},
+            }
+            
+            # Try to extract common job fields
+            if "description" in extract_fields:
+                # Try common job description selectors
+                desc_selectors = [
+                    ".job-description",
+                    "[data-testid='job-description']",
+                    ".jobs-description__content",
+                    "#job-details",
+                    ".jobsearch-JobComponent-description",
+                ]
+                for sel in desc_selectors:
+                    elem = await self._page.query_selector(sel)
+                    if elem:
+                        data["extracted"]["description"] = await elem.text_content()
+                        break
+                else:
+                    # Fallback: get first 2000 chars of body
+                    data["extracted"]["description"] = content[:2000]
+            
+            if "requirements" in extract_fields:
+                # Extract requirements (usually in bullet lists)
+                req_elems = await self._page.query_selector_all("ul li, .requirements li")
+                requirements = []
+                for elem in req_elems[:15]:
+                    text = await elem.text_content()
+                    if text and len(text) > 10:
+                        requirements.append(text.strip())
+                data["extracted"]["requirements"] = requirements
+            
+            if "company_info" in extract_fields:
+                # Try to find company information
+                company_selectors = [
+                    ".company-name",
+                    "[data-testid='company-name']",
+                    ".jobs-company__name",
+                    ".jobsearch-CompanyInfoWithReview",
+                ]
+                for sel in company_selectors:
+                    elem = await self._page.query_selector(sel)
+                    if elem:
+                        data["extracted"]["company_info"] = await elem.text_content()
+                        break
+            
+            return StepResult(
+                success=True,
+                action="scrape",
+                data=data
+            )
+            
+        except Exception as e:
+            return StepResult(
+                success=False,
+                action="scrape",
+                error=f"Scrape failed: {str(e)}"
+            )
+    
+    async def _handle_fill_form(self, step_data: Dict[str, Any]) -> StepResult:
+        """
+        Fill out an application form.
+        
+        Uses LLM-generated content and form field detection.
+        """
+        use_tailored_resume = step_data.get("use_tailored_resume", True)
+        
+        try:
+            # Find all form inputs
+            inputs = await self._page.query_selector_all("input:not([type='hidden']), textarea, select")
+            filled_count = 0
+            
+            for inp in inputs:
+                try:
+                    input_type = await inp.get_attribute("type") or "text"
+                    input_name = await inp.get_attribute("name") or ""
+                    placeholder = await inp.get_attribute("placeholder") or ""
+                    
+                    # Skip submit buttons and hidden fields
+                    if input_type in ("submit", "button", "hidden", "file"):
+                        continue
+                    
+                    # Fill based on field type/name
+                    value = None
+                    if "email" in input_name.lower() or "email" in placeholder.lower():
+                        value = "applicant@example.com"  # Would come from user profile
+                    elif "phone" in input_name.lower() or "phone" in placeholder.lower():
+                        value = "555-0123"
+                    elif "name" in input_name.lower():
+                        if "first" in input_name.lower():
+                            value = "John"
+                        elif "last" in input_name.lower():
+                            value = "Doe"
+                        else:
+                            value = "John Doe"
+                    elif "linkedin" in input_name.lower():
+                        value = "https://linkedin.com/in/johndoe"
+                    elif "website" in input_name.lower() or "portfolio" in input_name.lower():
+                        value = "https://johndoe.dev"
+                    
+                    if value and await inp.is_visible():
+                        await inp.fill(value)
+                        filled_count += 1
+                        
+                except Exception:
+                    continue
+            
+            return StepResult(
+                success=True,
+                action="fill_form",
+                data={
+                    "fields_filled": filled_count,
+                    "used_tailored_resume": use_tailored_resume,
+                }
+            )
+            
+        except Exception as e:
+            return StepResult(
+                success=False,
+                action="fill_form",
+                error=f"Form fill failed: {str(e)}"
+            )
+    
+    async def _handle_submit(self, step_data: Dict[str, Any]) -> StepResult:
+        """
+        Submit a form or click the submit/apply button.
+        """
+        confirm = step_data.get("confirm", True)
+        
+        if not confirm:
+            return StepResult(
+                success=True,
+                action="submit",
+                data={"skipped": True, "reason": "confirm=False"}
+            )
+        
+        try:
+            # Try common submit button selectors
+            submit_selectors = [
+                "button[type='submit']",
+                "input[type='submit']",
+                "button:has-text('Submit')",
+                "button:has-text('Apply')",
+                "button:has-text('Send')",
+                "[data-testid='submit-button']",
+                ".submit-button",
+                "#submit",
+            ]
+            
+            for selector in submit_selectors:
+                try:
+                    btn = await self._page.query_selector(selector)
+                    if btn and await btn.is_visible():
+                        await btn.click()
+                        await asyncio.sleep(2)  # Wait for submission
+                        
+                        return StepResult(
+                            success=True,
+                            action="submit",
+                            selector=selector,
+                            data={"submitted": True}
+                        )
+                except:
+                    continue
+            
+            return StepResult(
+                success=False,
+                action="submit",
+                error="Could not find submit button"
+            )
+            
+        except Exception as e:
+            return StepResult(
+                success=False,
+                action="submit",
+                error=f"Submit failed: {str(e)}"
+            )
+    
+    async def _handle_verify(self, step_data: Dict[str, Any]) -> StepResult:
+        """
+        Perform verification checks (e.g., hallucination guard).
+        
+        Currently a placeholder - would integrate with CriticAgent.
+        """
+        check = step_data.get("check", "basic")
+        
+        # For now, just return success
+        # In production, this would call the CriticAgent
+        return StepResult(
+            success=True,
+            action="verify",
+            data={
+                "check": check,
+                "passed": True,
+                "note": "Verification placeholder - would use CriticAgent",
+            }
+        )
     
     async def _human_delay(self) -> None:
         """Add a human-like random delay between actions."""

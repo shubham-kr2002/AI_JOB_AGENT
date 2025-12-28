@@ -9,16 +9,30 @@ Endpoints:
 - WS /agent/tasks/{task_id}/stream: Real-time execution feed (FR-02)
 """
 
+import asyncio
+import logging
 from typing import Optional
 from uuid import uuid4
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel, Field
 
 from app.services.intent import compile_intent, Goal
 from app.services.planner import generate_task_graph, plan_from_prompt
+from app.services.execution import (
+    execute_task_async,
+    get_task,
+    TaskExecution,
+    TaskExecutionStatus,
+    run_task_background,
+)
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+# Thread pool for running browser automation
+_executor = ThreadPoolExecutor(max_workers=4)
 
 
 # =============================================================================
@@ -203,22 +217,36 @@ async def create_task(request: TaskCreateRequest, background_tasks: BackgroundTa
     - Intervene: POST /agent/tasks/{task_id}/intervene
     """
     try:
+        logger.info(f"[Agent API] Received task request: {request.prompt}")
+        
         # Step 1: Compile intent
         goal = compile_intent(request.prompt, use_llm=True)
+        logger.info(f"[Agent API] Compiled goal: {goal.action} - {goal.role}")
         
         # Step 2: Generate plan
         graph = generate_task_graph(goal)
+        logger.info(f"[Agent API] Generated graph with {len(graph.nodes)} nodes")
         
-        # Step 3: Create task record (TODO: Save to database)
+        # Step 3: Create task record
         task_id = str(uuid4())
         
         # Step 4: Queue for execution if auto_start
         if request.auto_start and not request.dry_run:
-            # TODO: Push to Celery queue
-            # from app.core.celery_app import execute_task_graph
-            # background_tasks.add_task(execute_task_graph.delay, task_id, graph.to_dict())
-            status = "queued"
-            message = f"Task queued for execution. {len(graph.nodes)} steps to complete."
+            # Execute in background thread (browser automation needs its own event loop)
+            logger.info(f"[Agent API] Starting background execution for task {task_id}")
+            
+            # Use background task to run the browser automation
+            def run_browser_task():
+                try:
+                    result = run_task_background(task_id, request.prompt, graph.to_dict())
+                    logger.info(f"[Agent API] Task {task_id} completed: {result.status}")
+                except Exception as e:
+                    logger.error(f"[Agent API] Task {task_id} failed: {e}")
+            
+            _executor.submit(run_browser_task)
+            
+            status = "running"
+            message = f"Task started! Browser will open and execute {len(graph.nodes)} steps."
         elif request.dry_run:
             status = "dry_run"
             message = "Dry run completed. Plan generated but not executed."
@@ -237,6 +265,7 @@ async def create_task(request: TaskCreateRequest, background_tasks: BackgroundTa
         )
         
     except Exception as e:
+        logger.error(f"[Agent API] Failed to create task: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to create task: {str(e)}"
@@ -250,16 +279,37 @@ async def get_task_status(task_id: str):
     
     Returns progress information and current step being executed.
     """
-    # TODO: Fetch from database
-    # For now, return a mock response
+    # Fetch from in-memory task store
+    task = get_task(task_id)
+    
+    if task is None:
+        # Task not found - could be pending or invalid
+        return TaskStatusResponse(
+            task_id=task_id,
+            status="not_found",
+            progress_percent=0.0,
+            completed_steps=0,
+            total_steps=0,
+            current_step="Task not found or still initializing",
+            error_message=None,
+        )
+    
+    # Calculate progress
+    total = task.total_steps
+    completed = task.completed_steps
+    progress = (completed / total * 100) if total > 0 else 0.0
+    
+    # Convert enum to string if needed
+    status_str = task.status.value if hasattr(task.status, 'value') else str(task.status)
+    
     return TaskStatusResponse(
         task_id=task_id,
-        status="running",
-        progress_percent=35.0,
-        completed_steps=3,
-        total_steps=8,
-        current_step="Searching LinkedIn",
-        error_message=None,
+        status=status_str,
+        progress_percent=progress,
+        completed_steps=completed,
+        total_steps=total,
+        current_step=task.current_step or "Initializing...",
+        error_message=task.error_message,
     )
 
 

@@ -104,6 +104,29 @@ class TaskGraph:
             "nodes": [n.to_dict() for n in self.nodes],
         }
     
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TaskGraph":
+        """Reconstruct TaskGraph from dictionary."""
+        nodes = []
+        for node_data in data.get("nodes", []):
+            node = DAGNode(
+                id=node_data.get("id", str(uuid4())[:8]),
+                name=node_data.get("name", ""),
+                action=node_data.get("action", "navigate"),
+                depends_on=node_data.get("depends_on", []),
+                payload=node_data.get("payload", {}),
+                outputs=node_data.get("outputs", []),
+                status=NodeStatus(node_data.get("status", "pending")),
+                estimated_duration_seconds=node_data.get("estimated_duration_seconds", 5),
+            )
+            nodes.append(node)
+        
+        return cls(
+            nodes=nodes,
+            goal_summary=data.get("goal_summary", ""),
+            total_estimated_seconds=data.get("total_estimated_seconds", 0),
+        )
+    
     def get_ready_nodes(self) -> List[DAGNode]:
         """Get nodes that are ready to execute (all dependencies met)."""
         completed_ids = {n.id for n in self.nodes if n.status == NodeStatus.COMPLETED}
