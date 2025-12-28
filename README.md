@@ -10,6 +10,12 @@ A **Multi-Agent Orchestration System** with:
 - **The Dashboard (React Frontend):** Real-time monitoring and control
 - **The Extension (Chrome):** DOM interaction and page scraping
 
+## ✨ What's New (Dec 2025)
+- **Agent execution pipeline** now performs real browser automation with Playwright — tasks started from the extension or API actually open a browser and execute the plan.
+- **Extension:** Added **Resume PDF upload** directly in the popup (uploads to `/api/v1/resume/upload`).
+- **Extension:** Background task polling and persistent task state (tracked in the background service worker) so tasks continue to be monitored after switching tabs or closing the popup; desktop notifications on completion.
+- **Fixes:** API endpoints now queue and run tasks (no more mocked responses); task status reporting is real-time.
+
 ## 🏗️ Architecture Overview
 
 ```
@@ -129,7 +135,7 @@ alembic upgrade head
 python scripts/seed_sites.py
 
 # Start FastAPI server
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8001  # or set PORT in your environment
 
 # In a separate terminal - Start Celery worker
 celery -A app.core.celery_app worker --loglevel=info
@@ -150,7 +156,9 @@ Dashboard available at: http://localhost:3000
 ```bash
 cd extension
 npm install
-npm run dev  # or npm run build
+npm run dev  # development (hot reload)
+# or for production build
+npm run build
 ```
 
 Load in Chrome:
@@ -158,6 +166,17 @@ Load in Chrome:
 2. Enable Developer mode
 3. Click "Load unpacked"
 4. Select the `extension/build/chrome-mv3-dev` folder
+
+Notes:
+- The extension popup includes a **Resume PDF upload** button (PDF only). Uploaded resumes are sent to the backend `/api/v1/resume/upload` endpoint and used to tailor applications.
+- Task polling runs in the **background service worker** so tasks continue to be monitored when you switch tabs or close the popup. Notifications are shown when tasks complete.
+- Ensure the extension has the **Notifications** permission (added in manifest). If notifications don't appear, confirm Chrome notifications are enabled for the browser.
+
+Using the Extension:
+1. Open the popup and click **Upload Resume** (PDF). Wait for confirmation.
+2. Enter a prompt like: "Apply to 5 remote Python developer jobs" and press Enter or click 🚀.
+3. The popup will show task status; polling continues in the background if you close the popup.
+4. When the task completes, you will receive a desktop notification and can view results in the dashboard.
 
 ---
 
@@ -193,7 +212,7 @@ SUPABASE_KEY=your-supabase-anon-key
 
 Via API:
 ```bash
-curl -X POST http://localhost:8000/api/v1/resume/upload \
+curl -X POST http://localhost:8001/api/v1/resume/upload \\
   -F "file=@your_resume.pdf"
 ```
 
@@ -234,8 +253,8 @@ If selectors break (sites update their HTML):
 
 | Endpoint | Description |
 |----------|-------------|
-| `ws://localhost:8000/api/v1/ws` | Main WebSocket (subscribe to tasks) |
-| `ws://localhost:8000/api/v1/ws/task/{id}` | Task-specific stream |
+| `ws://localhost:8001/api/v1/ws` | Main WebSocket (subscribe to tasks) |
+| `ws://localhost:8001/api/v1/ws/task/{id}` | Task-specific stream |
 
 ### Intervention Endpoints
 
