@@ -21,8 +21,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy.orm import Session
-from app.db.session import SessionLocal
-from app.models.site_config import SiteConfig
+from app.db.database import SessionLocal
+from app.models.world_model import SiteConfig
 
 
 # =============================================================================

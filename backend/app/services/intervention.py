@@ -25,7 +25,7 @@ import redis
 
 from app.core.config import get_settings
 from app.core.celery_app import celery_app
-from app.db.session import get_db
+from app.db.database import get_db
 
 settings = get_settings()
 router = APIRouter()

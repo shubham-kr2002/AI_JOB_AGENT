@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 import redis.asyncio as aioredis
 
 from app.core.config import get_settings
-from app.db.session import get_db
+from app.db.database import get_db
 
 settings = get_settings()
 router = APIRouter()

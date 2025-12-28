@@ -9,6 +9,9 @@ The Visual Cortex provides:
 4. Fallback when selectors fail
 
 Reference: ProductRequirementsDocument.md AIR-01 - Multi-Modal LLM Integration
+
+NOTE: OpenAI API key is OPTIONAL. If not provided, visual analysis will be disabled
+and the system will rely on DOM-based selectors only.
 """
 
 import base64
@@ -18,14 +21,24 @@ from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+import logging
 
-from openai import AsyncOpenAI, OpenAI
+# OpenAI is optional - import with fallback
+try:
+    from openai import AsyncOpenAI, OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    AsyncOpenAI = None
+    OpenAI = None
+
 from pydantic import BaseModel
 
 from app.core.config import get_settings
 from app.core.celery_app import celery_app
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 class PageState(str, Enum):
@@ -188,9 +201,24 @@ Look at the screenshot taken AFTER the action and determine:
 }"""
 
     def __init__(self):
-        self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        self.sync_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        """Initialize Visual Cortex. OpenAI is optional - will work without it."""
+        self.enabled = False
+        self.client = None
+        self.sync_client = None
         self.model = "gpt-4o"  # Vision-capable model
+        
+        # Check if OpenAI is available and configured
+        if OPENAI_AVAILABLE and settings.OPENAI_API_KEY and settings.OPENAI_API_KEY != "sk-your-openai-api-key-here":
+            try:
+                self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+                self.sync_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+                self.enabled = True
+                logger.info("[VisualCortex] Initialized with OpenAI GPT-4o Vision")
+            except Exception as e:
+                logger.warning(f"[VisualCortex] Failed to initialize OpenAI: {e}")
+                self.enabled = False
+        else:
+            logger.info("[VisualCortex] OpenAI not configured - visual analysis disabled. System will use DOM selectors only.")
     
     async def analyze_page(
         self,
@@ -207,6 +235,20 @@ Look at the screenshot taken AFTER the action and determine:
         Returns:
             PageAnalysis with detected state, elements, and suggestions
         """
+        # Return empty analysis if visual cortex is disabled
+        if not self.enabled:
+            logger.debug("[VisualCortex] Skipping analysis - not enabled")
+            return PageAnalysis(
+                state=PageState.UNKNOWN,
+                title="Visual Analysis Disabled",
+                description="OpenAI API key not configured. Using DOM selectors only.",
+                elements=[],
+                action_suggestions=["Configure OPENAI_API_KEY for visual analysis"],
+                errors_detected=[],
+                confidence=0.0,
+                raw_analysis="Visual cortex disabled"
+            )
+        
         prompt = self.PAGE_ANALYSIS_PROMPT
         if context:
             prompt += f"\n\nAdditional context: {context}"
