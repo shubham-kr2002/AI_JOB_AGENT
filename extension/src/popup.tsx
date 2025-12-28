@@ -4,7 +4,8 @@
  * 
  * Features:
  * - Natural language prompt input
- * - Real-time task execution status
+ * - Real-time task execution status (persists across tab switches)
+ * - Resume PDF upload
  * - Works from any webpage (not just job sites)
  * - AI Thought Process display
  */
@@ -45,14 +46,49 @@ function Popup() {
   
   const [apiStatus, setApiStatus] = useState<'checking' | 'online' | 'offline'>('checking');
   const [resumeReady, setResumeReady] = useState(false);
+  const [resumeUploading, setResumeUploading] = useState(false);
+  const [showResumeUpload, setShowResumeUpload] = useState(false);
   const [history, setHistory] = useState<string[]>([]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Check API status on mount
+  // Check API status and restore task state on mount
   useEffect(() => {
     checkStatus();
     loadHistory();
+    restoreTaskState();
+    
+    // Set up listener for task state updates from background
+    const handleStorageChange = () => {
+      restoreTaskState();
+    };
+    
+    // Poll for updates while popup is open
+    const pollInterval = setInterval(restoreTaskState, 2000);
+    
+    return () => {
+      clearInterval(pollInterval);
+    };
   }, []);
+
+  async function restoreTaskState() {
+    try {
+      const response = await chrome.runtime.sendMessage({ action: 'getTaskState' });
+      if (response?.task) {
+        const task = response.task;
+        setTaskState({
+          status: task.status as TaskStatus,
+          message: task.message || '',
+          taskId: task.taskId,
+          progress: task.progress || 0,
+          currentStep: task.currentStep || '',
+          thoughtProcess: task.thoughtProcess || [],
+        });
+      }
+    } catch (error) {
+      console.log('[Popup] No active task state');
+    }
+  }
 
   async function checkStatus() {
     try {
@@ -95,20 +131,60 @@ function Popup() {
     localStorage.setItem('jobhunter_history', JSON.stringify(newHistory));
   }
 
+  async function handleResumeUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      alert('Please upload a PDF file');
+      return;
+    }
+    
+    setResumeUploading(true);
+    
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      
+      const response = await fetch('http://localhost:8001/api/v1/ingest/upload', {
+        method: 'POST',
+        body: formData,
+      });
+      
+      if (response.ok) {
+        setResumeReady(true);
+        setShowResumeUpload(false);
+        alert('Resume uploaded successfully! 🎉');
+      } else {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(error.detail || 'Upload failed');
+      }
+    } catch (error: any) {
+      alert(`Failed to upload resume: ${error.message}`);
+    } finally {
+      setResumeUploading(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  }
+
   async function executeCommand() {
     if (!prompt.trim() || apiStatus !== 'online') return;
     
     const command = prompt.trim();
     saveToHistory(command);
     
-    setTaskState({
+    const initialState: TaskState = {
       status: 'planning',
       message: 'AI is analyzing your request...',
       taskId: null,
       progress: 10,
       currentStep: 'Intent Analysis',
       thoughtProcess: [`📝 Received: "${command}"`, '🧠 Parsing intent...'],
-    });
+    };
+    
+    setTaskState(initialState);
 
     try {
       // Step 1: Create a task with the prompt
@@ -130,23 +206,36 @@ function Popup() {
       const data: AgentResponse = await response.json();
 
       if (data.success && data.task_id) {
-        setTaskState(prev => ({
-          ...prev,
+        const executingState: TaskState = {
           status: 'executing',
           message: data.plan_summary || 'Executing task...',
           taskId: data.task_id,
           progress: 30,
           currentStep: 'Task Started',
           thoughtProcess: [
-            ...prev.thoughtProcess,
+            ...initialState.thoughtProcess,
             `✅ Plan created: ${data.total_steps} steps`,
             `🚀 Task ID: ${data.task_id}`,
             '🔄 Executing...',
           ],
-        }));
+        };
+        
+        setTaskState(executingState);
 
-        // Start polling for status
-        pollTaskStatus(data.task_id);
+        // Start background polling (persists even when popup closes)
+        chrome.runtime.sendMessage({
+          action: 'startTaskPolling',
+          taskId: data.task_id,
+          initialState: {
+            taskId: data.task_id,
+            status: 'executing',
+            progress: 30,
+            currentStep: 'Task Started',
+            message: data.plan_summary || 'Executing task...',
+            thoughtProcess: executingState.thoughtProcess,
+            lastUpdated: Date.now(),
+          },
+        });
       } else {
         throw new Error(data.message || 'Failed to create task');
       }
@@ -158,71 +247,6 @@ function Popup() {
         thoughtProcess: [...prev.thoughtProcess, `❌ Error: ${error.message}`],
       }));
     }
-  }
-
-  async function pollTaskStatus(taskId: string) {
-    let attempts = 0;
-    const maxAttempts = 60; // 5 minutes max
-
-    const poll = async () => {
-      if (attempts >= maxAttempts) {
-        setTaskState(prev => ({
-          ...prev,
-          status: 'error',
-          message: 'Task timed out',
-        }));
-        return;
-      }
-
-      try {
-        const response = await fetch(`http://localhost:8001/api/v1/agent/tasks/${taskId}`);
-        if (!response.ok) throw new Error('Failed to get status');
-
-        const data = await response.json();
-        
-        setTaskState(prev => ({
-          ...prev,
-          progress: data.progress_percent || prev.progress,
-          currentStep: data.current_step || prev.currentStep,
-          thoughtProcess: data.current_step 
-            ? [...prev.thoughtProcess.slice(-5), `🔄 ${data.current_step}`]
-            : prev.thoughtProcess,
-        }));
-
-        if (data.status === 'completed' || data.status === 'success') {
-          setTaskState(prev => ({
-            ...prev,
-            status: 'complete',
-            message: data.message || 'Task completed successfully!',
-            progress: 100,
-            thoughtProcess: [...prev.thoughtProcess.slice(-5), '✅ Task completed!'],
-          }));
-        } else if (data.status === 'failed' || data.status === 'error') {
-          setTaskState(prev => ({
-            ...prev,
-            status: 'error',
-            message: data.error_message || 'Task failed',
-            thoughtProcess: [...prev.thoughtProcess.slice(-5), `❌ ${data.error_message}`],
-          }));
-        } else if (data.status === 'waiting_intervention') {
-          setTaskState(prev => ({
-            ...prev,
-            status: 'waiting',
-            message: 'Waiting for your input...',
-            thoughtProcess: [...prev.thoughtProcess.slice(-5), '⏸️ Human input required'],
-          }));
-        } else {
-          // Still running, continue polling
-          attempts++;
-          setTimeout(poll, 5000);
-        }
-      } catch (error: any) {
-        attempts++;
-        setTimeout(poll, 5000);
-      }
-    };
-
-    poll();
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -241,6 +265,12 @@ function Popup() {
   }
 
   function resetState() {
+    // Clear background task state
+    if (taskState.taskId) {
+      chrome.runtime.sendMessage({ action: 'stopTaskPolling', taskId: taskState.taskId });
+    }
+    chrome.runtime.sendMessage({ action: 'clearTaskState' });
+    
     setTaskState({
       status: 'idle',
       message: 'Enter a command to get started',
@@ -395,20 +425,76 @@ function Popup() {
         </div>
       )}
 
-      {/* Resume Warning */}
-      {!resumeReady && apiStatus === 'online' && taskState.status === 'idle' && (
+      {/* Resume Upload Section */}
+      {apiStatus === 'online' && taskState.status === 'idle' && (
         <div className="px-4 pb-4">
-          <div className="bg-yellow-900/30 border border-yellow-700 rounded-lg p-3">
-            <p className="text-sm text-yellow-400">
-              ⚠️ Upload your resume for personalized applications
-            </p>
-            <button
-              onClick={openDocs}
-              className="mt-2 text-xs text-yellow-500 hover:text-yellow-400 underline"
-            >
-              Upload at API Docs →
-            </button>
-          </div>
+          {/* Hidden file input */}
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleResumeUpload}
+            accept=".pdf"
+            className="hidden"
+          />
+          
+          {showResumeUpload ? (
+            <div className="bg-gray-800 border border-gray-600 rounded-lg p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-medium">Upload Resume (PDF)</h3>
+                <button
+                  onClick={() => setShowResumeUpload(false)}
+                  className="text-gray-400 hover:text-white text-lg"
+                >
+                  ×
+                </button>
+              </div>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={resumeUploading}
+                className="w-full py-3 border-2 border-dashed border-gray-500 hover:border-blue-500 rounded-lg text-center transition-colors disabled:opacity-50"
+              >
+                {resumeUploading ? (
+                  <span className="text-sm text-gray-400">Uploading...</span>
+                ) : (
+                  <>
+                    <span className="text-2xl block mb-1">📄</span>
+                    <span className="text-sm text-gray-400">Click to select PDF</span>
+                  </>
+                )}
+              </button>
+              <p className="text-xs text-gray-500 mt-2 text-center">
+                Your resume will be used to tailor applications
+              </p>
+            </div>
+          ) : !resumeReady ? (
+            <div className="bg-yellow-900/30 border border-yellow-700 rounded-lg p-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-yellow-400">
+                  ⚠️ Upload your resume for personalized applications
+                </p>
+              </div>
+              <button
+                onClick={() => setShowResumeUpload(true)}
+                className="mt-2 w-full py-2 bg-yellow-600 hover:bg-yellow-700 rounded text-sm font-medium transition-colors"
+              >
+                📤 Upload Resume
+              </button>
+            </div>
+          ) : (
+            <div className="bg-green-900/30 border border-green-700 rounded-lg p-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-green-400">
+                  ✅ Resume uploaded
+                </p>
+                <button
+                  onClick={() => setShowResumeUpload(true)}
+                  className="text-xs text-green-500 hover:text-green-400"
+                >
+                  Update
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

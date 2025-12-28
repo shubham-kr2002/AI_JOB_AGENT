@@ -33,7 +33,8 @@
     "permissions": [
       "activeTab",
       "storage",
-      "scripting"
+      "scripting",
+      "notifications"
     ]
   }
 }
