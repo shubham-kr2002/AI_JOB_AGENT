@@ -1,0 +1,118 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Global Styles - Terminal/Hacker Theme */
+:root {
+  --bg-primary: #0f172a;
+  --bg-secondary: #1e293b;
+  --accent-primary: #10b981;
+  --accent-secondary: #34d399;
+  --text-primary: #e2e8f0;
+  --text-muted: #94a3b8;
+  --border-color: #334155;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-primary);
+}
+
+/* Terminal/Console styling */
+.terminal-text {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+/* Glow effects */
+.glow-border {
+  box-shadow: 0 0 5px rgba(16, 185, 129, 0.3),
+              0 0 10px rgba(16, 185, 129, 0.2);
+}
+
+.glow-text {
+  text-shadow: 0 0 10px rgba(16, 185, 129, 0.5);
+}
+
+/* Input focus states */
+input:focus, textarea:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.5);
+}
+
+/* Animation utilities */
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+.cursor-blink::after {
+  content: '▋';
+  animation: blink 1s step-start infinite;
+  color: var(--accent-primary);
+}
+
+/* Status badge animations */
+.status-running {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Task graph node styles */
+.node-pending { @apply bg-slate-700 border-slate-500; }
+.node-running { @apply bg-yellow-900/30 border-yellow-500; }
+.node-completed { @apply bg-emerald-900/30 border-emerald-500; }
+.node-failed { @apply bg-red-900/30 border-red-500; }
+
+/* Log level colors */
+.log-info { @apply text-slate-300; }
+.log-action { @apply text-cyan-400; }
+.log-success { @apply text-emerald-400; }
+.log-error { @apply text-red-400; }
+.log-warning { @apply text-yellow-400; }
+
+/* Responsive layout helpers */
+@layer components {
+  .card {
+    @apply bg-slate-800 border border-slate-700 rounded-lg p-4;
+  }
+  
+  .btn-primary {
+    @apply bg-emerald-600 hover:bg-emerald-500 text-white font-medium 
+           px-4 py-2 rounded-lg transition-all duration-200
+           focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 
+           focus:ring-offset-slate-900;
+  }
+  
+  .btn-secondary {
+    @apply bg-slate-700 hover:bg-slate-600 text-slate-200 font-medium 
+           px-4 py-2 rounded-lg transition-all duration-200
+           border border-slate-600;
+  }
+  
+  .input-primary {
+    @apply bg-slate-800 border border-slate-600 rounded-lg px-4 py-2
+           text-slate-200 placeholder-slate-500
+           focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500
+           transition-all duration-200;
+  }
+}

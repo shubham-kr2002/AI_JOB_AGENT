@@ -1,0 +1,39 @@
+{
+  "name": "jobhunter-extension",
+  "displayName": "JobHunter - AI Job Application Auto-Filler",
+  "version": "1.0.0",
+  "description": "Hybrid Neuro-Symbolic AI Agent that auto-fills job applications using your resume",
+  "author": "JobHunter Team",
+  "source": "src/popup.tsx",
+  "scripts": {
+    "dev": "plasmo dev",
+    "build": "plasmo build",
+    "package": "plasmo package"
+  },
+  "dependencies": {
+    "plasmo": "^0.90.5",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.260",
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.32",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.3.0"
+  },
+  "manifest": {
+    "host_permissions": [
+      "<all_urls>"
+    ],
+    "permissions": [
+      "activeTab",
+      "storage",
+      "scripting"
+    ]
+  }
+}

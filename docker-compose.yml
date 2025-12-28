@@ -1,0 +1,103 @@
+# Project JobHunter V3 - Infrastructure Stack
+# Autonomous Agent Platform Services
+#
+# Usage:
+#   docker-compose up -d          # Start all services
+#   docker-compose logs -f        # View logs
+#   docker-compose down           # Stop services
+#   docker-compose down -v        # Stop and remove volumes
+
+version: "3.9"
+
+services:
+  # ============================================================================
+  # PostgreSQL 15 - Long-Term Memory & World Model
+  # Stores: Users, Task Logs, Profiles, World Model (JSONB)
+  # ============================================================================
+  db:
+    image: postgres:15-alpine
+    container_name: jobhunter-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jobhunter}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobhunter_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-jobhunter_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/scripts/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jobhunter} -d ${POSTGRES_DB:-jobhunter_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - jobhunter-network
+
+  # ============================================================================
+  # Redis 7 - Short-Term Memory & Task Queue
+  # Stores: Session State, Celery Task Queue, DOM Snapshots
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: jobhunter-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - jobhunter-network
+
+  # ============================================================================
+  # Qdrant - Vector Memory (Semantic Recall)
+  # Stores: Resume Embeddings, Task History, Past Plan Embeddings
+  # ============================================================================
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: jobhunter-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"    # REST API
+      - "6334:6334"    # gRPC API
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: 6334
+      QDRANT__SERVICE__HTTP_PORT: 6333
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6333/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - jobhunter-network
+
+# ============================================================================
+# Persistent Volumes
+# ============================================================================
+volumes:
+  postgres_data:
+    driver: local
+    name: jobhunter_postgres_data
+  redis_data:
+    driver: local
+    name: jobhunter_redis_data
+  qdrant_data:
+    driver: local
+    name: jobhunter_qdrant_data
+
+# ============================================================================
+# Network
+# ============================================================================
+networks:
+  jobhunter-network:
+    driver: bridge
+    name: jobhunter-network

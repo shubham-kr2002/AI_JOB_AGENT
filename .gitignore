@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Database
+*.db
+*.sqlite3
+chroma_db/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# Extension (if building)
+extension/*.zip
+extension/web-ext-artifacts/
+extension/.plasmo/
+extension/build/
+
+# Node
+node_modules/
+.npm
+.pnp
+.pnp.js
+
+# Frontend build (keep in dist for Vercel)
+frontend/node_modules/
+
+# Vercel
+.vercel
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+coverage/
+
+# Keys
+*.pem
+
