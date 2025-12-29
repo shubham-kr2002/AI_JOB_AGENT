@@ -111,6 +111,16 @@ class TaskCreateRequest(BaseModel):
         default=False,
         description="If true, generate plan but don't execute"
     )
+    # Execution mode: 'playwright' (backend opens browser) or 'in_tab' (extension executes in the active tab)
+    execution_mode: Optional[str] = Field(
+        default="playwright",
+        description="Execution mode for the task: 'playwright' or 'in_tab'"
+    )
+    # Optional metadata for in-tab execution (tab id)
+    tab_id: Optional[int] = Field(default=None, description="Optional tab id when using in_tab execution")
+    # Optional CDP attach flags (advanced)
+    use_cdp: Optional[bool] = Field(default=False, description="Whether to attach to an existing browser via CDP (advanced)")
+    cdp_endpoint: Optional[str] = Field(default=None, description="CDP endpoint websocket URL, e.g., ws://127.0.0.1:9222")
 
 
 class TaskCreateResponse(BaseModel):
@@ -133,6 +143,72 @@ class TaskStatusResponse(BaseModel):
     total_steps: int
     current_step: Optional[str] = None
     error_message: Optional[str] = None
+
+
+# =============================================================================
+# Execution control endpoints for extension-based execution
+# =============================================================================
+
+
+class ExecutionClaim(BaseModel):
+    """Claim a waiting task for in-tab execution."""
+    tab_id: Optional[int] = None
+    mode: Optional[str] = "in_tab"
+
+
+class StepReport(BaseModel):
+    """Report a step result from in-tab execution."""
+    step_id: str
+    step_name: Optional[str] = None
+    success: bool
+    data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    meta: Optional[Dict[str, Any]] = None  # e.g., attempt, timestamp, extra diagnostics
+
+
+@router.post("/tasks/{task_id}/claim")
+async def claim_task(task_id: str, claim: ExecutionClaim):
+    """Claim a waiting task for execution (used by the extension for in-tab mode)."""
+    try:
+        # Create or mark task as running in the execution store
+        from app.services.execution import create_task_execution, get_task
+
+        # If task exists, update, else create
+        task = get_task(task_id)
+        if not task:
+            create_task_execution(task_id, prompt="[in-tab claimed task]", total_steps=0)
+        else:
+            # Mark running
+            from app.services.execution import update_task
+            update_task(task_id, status="running")
+
+        return {"success": True, "task_id": task_id, "status": "running"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tasks/{task_id}/report")
+async def report_step(task_id: str, report: StepReport):
+    """Report a step result from in-tab execution (extension -> backend)."""
+    try:
+        from app.services.execution import report_step, get_task
+
+        task = report_step(
+            task_id=task_id,
+            step_id=report.step_id,
+            step_name=report.step_name,
+            success=report.success,
+            data=report.data,
+            error=report.error,
+            meta=report.meta,
+        )
+
+        if not task:
+            raise Exception("Task not found")
+
+        return {"success": True, "task_id": task_id, "status": task.status, "progress": task.progress_percent}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =============================================================================
@@ -232,21 +308,31 @@ async def create_task(request: TaskCreateRequest, background_tasks: BackgroundTa
         
         # Step 4: Queue for execution if auto_start
         if request.auto_start and not request.dry_run:
-            # Execute in background thread (browser automation needs its own event loop)
-            logger.info(f"[Agent API] Starting background execution for task {task_id}")
-            
-            # Use background task to run the browser automation
-            def run_browser_task():
-                try:
-                    result = run_task_background(task_id, request.prompt, graph.to_dict())
-                    logger.info(f"[Agent API] Task {task_id} completed: {result.status}")
-                except Exception as e:
-                    logger.error(f"[Agent API] Task {task_id} failed: {e}")
-            
-            _executor.submit(run_browser_task)
-            
-            status = "running"
-            message = f"Task started! Browser will open and execute {len(graph.nodes)} steps."
+            if request.execution_mode == "in_tab":
+                # In-Tab execution: create task record but do not start backend executor
+                from app.services.execution import create_task_execution
+                create_task_execution(task_id, request.prompt, total_steps=len(graph.nodes))
+                status = "waiting"  # Waiting for extension to claim and execute the task
+                message = f"Task created for in-tab execution. Claim this task from the extension to start executing {len(graph.nodes)} steps."
+            else:
+                # Execute in background thread (browser automation needs its own event loop)
+                logger.info(f"[Agent API] Starting background execution for task {task_id}")
+                
+                # Use background task to run the browser automation
+                def run_browser_task():
+                    try:
+                        result = run_task_background(task_id, request.prompt, graph.to_dict())
+                        logger.info(f"[Agent API] Task {task_id} completed: {result.status}")
+                    except Exception as e:
+                        logger.error(f"[Agent API] Task {task_id} failed: {e}")
+                
+                _executor.submit(run_browser_task)
+                
+                status = "running"
+                if request.use_cdp:
+                    message = f"Task started! Will attach to an existing browser via CDP and execute {len(graph.nodes)} steps."
+                else:
+                    message = f"Task started! Browser will open and execute {len(graph.nodes)} steps."
         elif request.dry_run:
             status = "dry_run"
             message = "Dry run completed. Plan generated but not executed."

@@ -12,11 +12,16 @@ Reference: BackendTechnicalDesign.md Section 3B
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Text, DateTime, Boolean, Integer, func, Index
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import String, Text, DateTime, Boolean, Integer, func, Index, JSON
+# Use PostgreSQL JSONB when available, otherwise fall back to generic JSON for SQLite
+try:
+    from sqlalchemy.dialects.postgresql import JSONB as JSONB_TYPE
+except Exception:
+    JSONB_TYPE = JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TimestampMixin
+from app.db.database import Base
+from app.models.base import TimestampMixin
 
 
 class SiteConfig(Base, TimestampMixin):
@@ -49,7 +54,7 @@ class SiteConfig(Base, TimestampMixin):
     # Login Configuration
     # =========================================================================
     login_config: Mapped[dict] = mapped_column(
-        JSONB,
+        JSON,
         default=dict,
         nullable=False
     )
@@ -75,7 +80,7 @@ class SiteConfig(Base, TimestampMixin):
     # Page Selectors (The Knowledge Library)
     # =========================================================================
     selectors: Mapped[dict] = mapped_column(
-        JSONB,
+        JSON,
         default=dict,
         nullable=False
     )
@@ -116,7 +121,7 @@ class SiteConfig(Base, TimestampMixin):
     # Behavior Configuration
     # =========================================================================
     behavior: Mapped[dict] = mapped_column(
-        JSONB,
+        JSON,
         default=dict,
         nullable=False
     )
@@ -142,7 +147,7 @@ class SiteConfig(Base, TimestampMixin):
     # API Configuration (if site has API)
     # =========================================================================
     api_config: Mapped[Optional[dict]] = mapped_column(
-        JSONB,
+        JSON,
         nullable=True
     )
     """

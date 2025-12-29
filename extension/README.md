@@ -9,6 +9,19 @@ AI-powered job application auto-filler built with Plasmo, React, TypeScript, and
 - **Language**: TypeScript 5.3
 - **Target**: Chrome Manifest V3
 
+## Permissions & Testing
+
+We now restrict content script injection scope to common job sites by default (LinkedIn, Indeed, Glassdoor, Greenhouse, Lever, Workday) and localhost. This prevents accidental injection on unrelated sites and is safer for production.
+
+If you need to test on other sites, update `.plasmo/chrome-mv3.plasmo.manifest.json` / `package.json` host_permissions.
+
+### Running tests
+
+- Install dev deps: npm install
+- Run: npm test
+
+We added unit tests for the content script (`src/contents/__tests__/jobhunter.test.ts`) that exercise `executeStep` logic (type, click, extract, search, loop, parse).
+
 ## Project Structure
 
 ```

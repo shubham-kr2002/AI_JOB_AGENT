@@ -37,17 +37,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'startTaskPolling') {
     startPollingTask(message.taskId, message.initialState);
     sendResponse({ success: true });
+
   } else if (message.action === 'stopTaskPolling') {
     stopPollingTask(message.taskId);
     sendResponse({ success: true });
+
   } else if (message.action === 'getTaskState') {
     chrome.storage.local.get(['activeTask'], (result) => {
       sendResponse({ task: result.activeTask || null });
     });
     return true; // Keep channel open for async response
+
   } else if (message.action === 'clearTaskState') {
     chrome.storage.local.remove(['activeTask']);
     sendResponse({ success: true });
+
   } else if (message.action === 'newFieldsDetected') {
     // Could show a notification or update badge
     chrome.action.setBadgeText({ 
@@ -57,7 +61,63 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.action.setBadgeBackgroundColor({ 
       color: '#22c55e' 
     });
-  }
+
+  } else if (message.action === 'startInTabTask') {
+    // Start in-tab execution flow: claim task on backend then send executeSteps to active tab
+    const { taskId, planNodes } = message as { taskId: string; planNodes: any[] };
+
+    fetch(`http://localhost:8001/api/v1/agent/tasks/${taskId}/claim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'in_tab' }),
+    }).then(() => {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tab = tabs[0];
+        if (!tab || !tab.id) {
+          console.error('[JobHunter] No active tab to run in-tab task');
+          return;
+        }
+
+        chrome.tabs.sendMessage(tab.id, { action: 'executeSteps', taskId, steps: planNodes }, (resp) => {
+          console.log('[JobHunter] executeSteps response:', resp);
+        });
+      });
+    }).catch((err) => console.error('[JobHunter] Claim task error:', err));
+
+    sendResponse({ success: true });
+
+  } else if (message.action === 'stepResult') {
+    // Received a step result from a content script; forward to backend and update local state
+    const { taskId, stepId, stepName, success, data, error, meta } = message as {
+      taskId: string;
+      stepId: string;
+      stepName?: string;
+      success: boolean;
+      data?: any;
+      error?: string;
+      meta?: any;
+    };
+
+    const outgoingMeta = { forwarded_at: Date.now(), ...(meta || {}) };
+
+    fetch(`http://localhost:8001/api/v1/agent/tasks/${taskId}/report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ step_id: stepId, step_name: stepName, success, data, error, meta: outgoingMeta }),
+    }).then((r) => r.json()).then((json) => {
+      chrome.storage.local.get(['activeTask'], (result) => {
+        const state = result.activeTask || {};
+        state.status = json.status || state.status;
+        state.progress = json.progress || state.progress;
+        state.currentStep = stepName || state.currentStep;
+        state.lastUpdated = Date.now();
+        state.thoughtProcess = [...(state.thoughtProcess || []).slice(-5), `🔄 ${stepName} - ${success ? 'ok' : 'fail'}`];
+        chrome.storage.local.set({ activeTask: state });
+      });
+    }).catch((err) => console.error('[JobHunter] step report error:', err));
+
+    sendResponse({ success: true });
+
 
   return true;
 });

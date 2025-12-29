@@ -63,6 +63,20 @@ def get_task(task_id: str) -> Optional[TaskExecution]:
     return _task_store.get(task_id)
 
 
+def create_task_execution(task_id: str, prompt: str, total_steps: int = 0) -> TaskExecution:
+    """Create a new TaskExecution entry in the in-memory store."""
+    task = TaskExecution(
+        task_id=task_id,
+        prompt=prompt,
+        status=TaskExecutionStatus.RUNNING,
+        total_steps=total_steps,
+        started_at=datetime.now(),
+    )
+    _task_store[task_id] = task
+    logger.info(f"[Execution] Created task execution: {task_id}")
+    return task
+
+
 def update_task(task_id: str, **kwargs) -> Optional[TaskExecution]:
     """Update task execution fields."""
     task = _task_store.get(task_id)
@@ -70,6 +84,55 @@ def update_task(task_id: str, **kwargs) -> Optional[TaskExecution]:
         for key, value in kwargs.items():
             if hasattr(task, key):
                 setattr(task, key, value)
+    return task
+
+
+def report_step(
+    task_id: str,
+    step_id: str,
+    step_name: str | None,
+    success: bool,
+    data: Optional[Dict[str, Any]] = None,
+    error: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> Optional[TaskExecution]:
+    """Report a step result for an in-tab executed task.
+
+    This updates progress, logs the step, and completes the task if all steps are done.
+    """
+    task = _task_store.get(task_id)
+    if not task:
+        return None
+
+    # Append step log
+    step_log = {
+        "node_id": step_id,
+        "name": step_name,
+        "success": success,
+        "error": error,
+        "data": data,        "meta": meta,        "timestamp": datetime.now().isoformat(),
+    }
+    task.steps_log.append(step_log)
+
+    if success:
+        task.completed_steps += 1
+
+    task.current_step = step_name or task.current_step
+
+    # Update progress
+    if task.total_steps > 0:
+        task.progress_percent = min(100.0, (task.completed_steps / task.total_steps) * 100.0)
+
+    # If completed
+    if task.total_steps > 0 and task.completed_steps >= task.total_steps:
+        task.status = TaskExecutionStatus.COMPLETED
+        task.completed_at = datetime.now()
+        task.progress_percent = 100.0
+
+    if error:
+        task.error_message = error
+        task.status = TaskExecutionStatus.FAILED
+
     return task
 
 

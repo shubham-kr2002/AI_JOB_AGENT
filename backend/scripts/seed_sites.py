@@ -425,20 +425,50 @@ SITE_CONFIGS = [
 def seed_sites(db: Session) -> None:
     """Seed site configurations into database."""
     for config in SITE_CONFIGS:
+        # Use domain as primary key
+        domain = config.get("domain")
+        if not domain:
+            print("Skipping site config without domain")
+            continue
+
         existing = db.query(SiteConfig).filter(
-            SiteConfig.site_name == config["site_name"]
+            SiteConfig.domain == domain
         ).first()
-        
+
+        # Normalize incoming config to match SiteConfig model
+        site_kwargs = {
+            "domain": domain,
+            "name": config.get("site_name") or config.get("name") or domain,
+            "selectors": config.get("selectors", {}),
+            "login_config": {
+                "login_url": config.get("login_url"),
+                "base_url": config.get("base_url"),
+                **({} if not config.get("login") else config.get("login"))
+            },
+            "behavior": {
+                **({} if not config.get("stealth_settings") else {"stealth_settings": config.get("stealth_settings")} ),
+                **({} if not config.get("rate_limits") else {"rate_limits": config.get("rate_limits")})
+            },
+            "api_config": config.get("api_config"),
+            "is_active": config.get("is_active", True),
+            "notes": config.get("notes"),
+        }
+
         if existing:
-            # Update existing
-            for key, value in config.items():
-                setattr(existing, key, value)
-            print(f"Updated: {config['site_name']}")
+            # Update existing fields
+            existing.name = site_kwargs["name"]
+            existing.selectors = site_kwargs["selectors"]
+            existing.login_config = site_kwargs["login_config"]
+            existing.behavior = site_kwargs["behavior"]
+            existing.api_config = site_kwargs["api_config"]
+            existing.is_active = site_kwargs["is_active"]
+
+            print(f"Updated: {site_kwargs['name']} ({domain})")
         else:
-            # Create new
-            site_config = SiteConfig(**config)
+            # Create new SiteConfig
+            site_config = SiteConfig(**site_kwargs)
             db.add(site_config)
-            print(f"Created: {config['site_name']}")
+            print(f"Created: {site_kwargs['name']} ({domain})")
     
     db.commit()
     print(f"\nSeeded {len(SITE_CONFIGS)} site configurations.")
@@ -450,6 +480,10 @@ def main():
     print("Project JobHunter V3 - Site Configuration Seeder")
     print("=" * 60)
     
+    # Ensure database tables exist (for local SQLite usage)
+    from app.db.database import init_db
+    init_db()
+
     db = SessionLocal()
     try:
         seed_sites(db)

@@ -49,6 +49,11 @@ function Popup() {
   const [resumeUploading, setResumeUploading] = useState(false);
   const [showResumeUpload, setShowResumeUpload] = useState(false);
   const [history, setHistory] = useState<string[]>([]);
+  const [executionMode, setExecutionMode] = useState<'playwright' | 'in_tab'>('playwright');
+  const [useCdp, setUseCdp] = useState(false);
+  const [showCdpDoc, setShowCdpDoc] = useState(false);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [skipInTabConfirm, setSkipInTabConfirm] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -58,6 +63,11 @@ function Popup() {
     loadHistory();
     restoreTaskState();
     
+    // Load user preference for skipping in-tab confirmation
+    chrome.storage.local.get(['skipInTabConfirm'], (res) => {
+      if (res.skipInTabConfirm) setSkipInTabConfirm(Boolean(res.skipInTabConfirm));
+    });
+
     // Set up listener for task state updates from background
     const handleStorageChange = () => {
       restoreTaskState();
@@ -146,7 +156,7 @@ function Popup() {
       const formData = new FormData();
       formData.append('file', file);
       
-      const response = await fetch('http://localhost:8001/api/v1/ingest/upload', {
+      const response = await fetch('http://localhost:8001/api/v1/resume/upload', {
         method: 'POST',
         body: formData,
       });
@@ -171,10 +181,23 @@ function Popup() {
 
   async function executeCommand() {
     if (!prompt.trim() || apiStatus !== 'online') return;
-    
+
+    // If in-tab and confirmation required, show modal first
+    if (executionMode === 'in_tab' && !skipInTabConfirm && !showConfirmModal) {
+      setShowConfirmModal(true);
+      return;
+    }
+
+    await proceedWithExecute();
+  }
+
+  // The actual executor (called directly or from the confirmation modal)
+  async function proceedWithExecute() {
+    if (!prompt.trim() || apiStatus !== 'online') return;
+
     const command = prompt.trim();
     saveToHistory(command);
-    
+
     const initialState: TaskState = {
       status: 'planning',
       message: 'AI is analyzing your request...',
@@ -183,61 +206,114 @@ function Popup() {
       currentStep: 'Intent Analysis',
       thoughtProcess: [`📝 Received: "${command}"`, '🧠 Parsing intent...'],
     };
-    
+
     setTaskState(initialState);
 
     try {
-      // Step 1: Create a task with the prompt
-      const response = await fetch('http://localhost:8001/api/v1/agent/tasks', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: command,
-          auto_start: true,
-          dry_run: false,
-        }),
-      });
+      if (executionMode === 'in_tab') {
+        // 1) Generate a plan (preview)
+        const planResp = await fetch('http://localhost:8001/api/v1/agent/plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: command }),
+        });
+        if (!planResp.ok) throw new Error('Failed to generate plan');
+        const planData = await planResp.json();
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `HTTP ${response.status}`);
-      }
+        // 2) Create task but do NOT auto-start - extension will claim and execute
+        const createResp = await fetch('http://localhost:8001/api/v1/agent/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: command, auto_start: false, dry_run: false, execution_mode: 'in_tab' }),
+        });
+        if (!createResp.ok) {
+          const err = await createResp.json().catch(() => ({}));
+          throw new Error(err.detail || 'Failed to create in-tab task');
+        }
+        const createData: AgentResponse = await createResp.json();
+        if (!createData.success || !createData.task_id) throw new Error('Task creation failed');
 
-      const data: AgentResponse = await response.json();
+        // Send startInTabTask to background to claim & forward plan nodes to the active tab
+        chrome.runtime.sendMessage({ action: 'startInTabTask', taskId: createData.task_id, planNodes: planData.plan.nodes }, (resp) => {
+          // Start polling for task updates
+          chrome.runtime.sendMessage({
+            action: 'startTaskPolling',
+            taskId: createData.task_id,
+            initialState: {
+              taskId: createData.task_id,
+              status: 'waiting',
+              progress: 0,
+              currentStep: 'Waiting for tab to claim task',
+              message: createData.plan_summary || 'Waiting for claim',
+              thoughtProcess: [...initialState.thoughtProcess, `🔁 Created in-tab task ${createData.task_id}`],
+              lastUpdated: Date.now(),
+            },
+          });
+        });
 
-      if (data.success && data.task_id) {
-        const executingState: TaskState = {
-          status: 'executing',
-          message: data.plan_summary || 'Executing task...',
-          taskId: data.task_id,
-          progress: 30,
-          currentStep: 'Task Started',
-          thoughtProcess: [
-            ...initialState.thoughtProcess,
-            `✅ Plan created: ${data.total_steps} steps`,
-            `🚀 Task ID: ${data.task_id}`,
-            '🔄 Executing...',
-          ],
-        };
-        
-        setTaskState(executingState);
+        setTaskState({
+          status: 'waiting',
+          message: 'Waiting for your active tab to claim and execute the task',
+          taskId: createData.task_id,
+          progress: 0,
+          currentStep: 'Waiting to be claimed',
+          thoughtProcess: [...initialState.thoughtProcess, `🔁 Created in-tab task`],
+        });
 
-        // Start background polling (persists even when popup closes)
-        chrome.runtime.sendMessage({
-          action: 'startTaskPolling',
-          taskId: data.task_id,
-          initialState: {
-            taskId: data.task_id,
+      } else {
+        // Playwright (backend) execution - include CDP flag when requested
+        const response = await fetch('http://localhost:8001/api/v1/agent/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: command,
+            auto_start: true,
+            dry_run: false,
+            use_cdp: useCdp,
+          }),
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.detail || `HTTP ${response.status}`);
+        }
+
+        const data: AgentResponse = await response.json();
+
+        if (data.success && data.task_id) {
+          const executingState: TaskState = {
             status: 'executing',
+            message: data.plan_summary || 'Executing task...',
+            taskId: data.task_id,
             progress: 30,
             currentStep: 'Task Started',
-            message: data.plan_summary || 'Executing task...',
-            thoughtProcess: executingState.thoughtProcess,
-            lastUpdated: Date.now(),
-          },
-        });
-      } else {
-        throw new Error(data.message || 'Failed to create task');
+            thoughtProcess: [
+              ...initialState.thoughtProcess,
+              `✅ Plan created: ${data.total_steps} steps`,
+              `🚀 Task ID: ${data.task_id}`,
+              '🔄 Executing...',
+            ],
+          };
+          
+          setTaskState(executingState);
+
+          // Start background polling (persists even when popup closes)
+          chrome.runtime.sendMessage({
+            action: 'startTaskPolling',
+            taskId: data.task_id,
+            initialState: {
+              taskId: data.task_id,
+              status: 'executing',
+              progress: 30,
+              currentStep: 'Task Started',
+              message: data.plan_summary || 'Executing task...',
+              thoughtProcess: executingState.thoughtProcess,
+              lastUpdated: Date.now(),
+            },
+          });
+        } else {
+          throw new Error(data.message || 'Failed to create task');
+        }
       }
     } catch (error: any) {
       setTaskState(prev => ({
@@ -340,9 +416,22 @@ function Popup() {
               <span>🚀</span>
             )}
           </button>
-        </div>
+          <div className="mt-3 flex items-center gap-3">
+            <label className="text-xs text-gray-400">Execution mode:</label>
+            <select
+              value={executionMode}
+              onChange={(e) => setExecutionMode(e.target.value as 'playwright' | 'in_tab')}
+              className="text-xs bg-gray-800 border border-gray-600 rounded px-2 py-1"
+            >
+              <option value="playwright">Isolated browser (safe)</option>
+              <option value="in_tab">Run in active tab (use your session)</option>
+            </select>
+            {executionMode === 'in_tab' && (
+              <span className="text-xs text-yellow-300">⚠️ Will use the current tab's session</span>
+            )}
+          </div>
 
-        {/* Quick Examples */}
+        {/* Quick Examples + Execution Mode */}
         {!isProcessing && taskState.status === 'idle' && (
           <div className="mt-3 space-y-2">
             <p className="text-xs text-gray-500">Examples:</p>
@@ -356,6 +445,31 @@ function Popup() {
                   {example}
                 </button>
               ))}
+            </div>
+
+            {/* Execution Mode */}
+            <div className="mt-3">
+              <p className="text-xs text-gray-500 mb-1">Execution mode:</p>
+              <div className="flex items-center gap-3">
+                <label className={`text-xs px-2 py-1 rounded ${executionMode === 'playwright' ? 'bg-gray-700 text-white' : 'bg-gray-800 text-gray-300'}`}>
+                  <input type="radio" name="execMode" className="mr-2" checked={executionMode === 'playwright'} onChange={() => setExecutionMode('playwright')} /> Isolated browser
+                </label>
+                <label className={`text-xs px-2 py-1 rounded ${executionMode === 'in_tab' ? 'bg-gray-700 text-white' : 'bg-gray-800 text-gray-300'}`}>
+                  <input type="radio" name="execMode" className="mr-2" checked={executionMode === 'in_tab'} onChange={() => setExecutionMode('in_tab')} /> Run in active tab
+                </label>
+              </div>
+
+              {executionMode === 'playwright' && (
+                <div className="mt-2 text-xs text-gray-400 flex items-center gap-2">
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={useCdp} onChange={(e) => setUseCdp(e.target.checked)} />
+                    Enable Playwright CDP attach (advanced)
+                  </label>
+                  <button className="text-xs text-blue-400 hover:underline" onClick={() => { setShowCdpDoc(true); window.open('https://github.com/shubham-kr2002/AI_JOB_AGENT/blob/main/design/CDP.md'); }}>
+                    How to use CDP
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -516,6 +630,24 @@ function Popup() {
         </div>
       )}
 
+      {/* In-Tab Confirmation Modal */}
+      {showConfirmModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-gray-800 rounded-lg p-6 w-80">
+            <h3 className="text-lg font-bold mb-2">Confirm running in active tab</h3>
+            <p className="text-sm text-gray-400 mb-3">This will execute steps within your current tab using your logged-in session. Only proceed if you trust the site and want to use your account.</p>
+            <label className="flex items-center gap-2 text-sm mb-3">
+              <input type="checkbox" checked={skipInTabConfirm} onChange={(e) => { setSkipInTabConfirm(e.target.checked); chrome.storage.local.set({ skipInTabConfirm: e.target.checked }); }} />
+              Don't ask me again
+            </label>
+            <div className="flex justify-end gap-2">
+              <button className="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600" onClick={() => setShowConfirmModal(false)}>Cancel</button>
+              <button className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-700" onClick={() => { setShowConfirmModal(false); proceedWithExecute(); }}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
+      
       {/* Footer */}
       <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-gray-700 bg-gray-900">
         <div className="flex justify-between items-center">

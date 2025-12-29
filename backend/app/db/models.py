@@ -18,6 +18,13 @@ import enum
 
 from app.db.database import Base
 
+# Import additional model modules to ensure they are registered with SQLAlchemy's metadata
+# (SiteConfig lives in app.models.world_model and isn't in this file)
+try:
+    from app.models.world_model import SiteConfig  # noqa: F401
+except Exception:
+    pass
+
 
 class SubscriptionTier(enum.Enum):
     """User subscription tiers."""

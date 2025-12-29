@@ -24,11 +24,40 @@
     "autoprefixer": "^10.4.16",
     "postcss": "^8.4.32",
     "tailwindcss": "^3.4.0",
-    "typescript": "^5.3.0"
+    "typescript": "^5.3.0",
+    "jest": "^29.6.0",
+    "ts-jest": "^29.0.0",
+    "@types/jest": "^29.5.2",
+    "@testing-library/jest-dom": "^6.0.0",
+    "jest-environment-jsdom": "^29.5.0",
+    "playwright": "^1.43.0",
+    "@playwright/test": "^1.43.0"
+  },
+
+  "scripts": {
+    "dev": "plasmo dev",
+    "build": "plasmo build",
+    "package": "plasmo package",
+    "test": "jest --runInBand",
+    "test:e2e": "playwright test --project=chromium"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "jsdom",
+    "setupFiles": ["<rootDir>/jest.setup.js"],
+    "moduleFileExtensions": ["ts","tsx","js","jsx"],
+    "transform": {"^.+\\.(ts|tsx)$": "ts-jest"}
   },
   "manifest": {
     "host_permissions": [
-      "<all_urls>"
+      "https://*.linkedin.com/*",
+      "https://*.indeed.com/*",
+      "https://*.glassdoor.com/*",
+      "https://*.greenhouse.io/*",
+      "https://*.lever.co/*",
+      "https://*.workday.com/*",
+      "http://localhost/*",
+      "http://127.0.0.1/*"
     ],
     "permissions": [
       "activeTab",
